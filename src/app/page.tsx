@@ -1,13 +1,11 @@
 'use client'
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
-// ── Types ──
 type Task = { id: string; label: string }
 type Package = { id: string; name: string; icon: string; color: string; tasks: Task[] }
 type Patient = { id: string; bed: string; name: string; packages: string[]; routineTasks: Task[]; customTasks: Task[] }
 type Checked = Record<string, Record<string, boolean>>
 
-// ── Defaults ──
 const DEFAULT_PACKAGES: Package[] = [
   { id:'pkg_cancer', name:'癌症', icon:'🎗️', color:'#7C3AED', tasks:[
     {id:'c1',label:'疼痛評估（NRS 量表）'},
@@ -54,26 +52,23 @@ const PKG_ICONS = ['📋','🎗️','💉','🧠','❤️','🫁','🦴','💊',
 
 function uid() { return Math.random().toString(36).slice(2,9) }
 
-// ── Storage via API ──
-async function loadKey(key: string) {
+// ── Direct save to API (no debounce issues) ──
+async function saveToAPI(key: string, value: unknown) {
+  await fetch('/api/data', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key, value }),
+  })
+}
+
+async function loadFromAPI(key: string) {
   try {
-    const res = await fetch(`/api/data?key=${key}`)
+    const res = await fetch(`/api/data?key=${encodeURIComponent(key)}`)
     const json = await res.json()
     return json.value ?? null
   } catch { return null }
 }
 
-async function saveKey(key: string, value: unknown) {
-  try {
-    await fetch('/api/data', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key, value }),
-    })
-  } catch (e) { console.error('save failed', e) }
-}
-
-// ── Components ──
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(15,23,42,0.6)',zIndex:999,display:'flex',alignItems:'flex-end',justifyContent:'center'}} onClick={onClose}>
@@ -97,24 +92,23 @@ function ProgressBar({ pct }: { pct: number }) {
   )
 }
 
-function SaveIndicator({ status }: { status: 'idle'|'saving'|'saved'|'error' }) {
-  if (status === 'idle') return null
+function SaveBadge({ status }: { status: 'idle'|'saving'|'saved'|'error' }) {
+  if (status==='idle') return null
   const map = {
-    saving: { text:'儲存中...', color:'#64748B', bg:'#F1F5F9' },
-    saved:  { text:'✓ 已儲存', color:'#16A34A', bg:'#DCFCE7' },
-    error:  { text:'⚠ 儲存失敗', color:'#DC2626', bg:'#FEE2E2' },
+    saving: {text:'儲存中...', color:'#64748B', bg:'#F1F5F9'},
+    saved:  {text:'✓ 已儲存',  color:'#16A34A', bg:'#DCFCE7'},
+    error:  {text:'⚠ 儲存失敗',color:'#DC2626', bg:'#FEE2E2'},
   }
   const s = map[status]
   return (
-    <div style={{position:'fixed',top:72,right:12,zIndex:200,background:s.bg,color:s.color,
-      fontSize:12,fontWeight:700,padding:'6px 12px',borderRadius:99,boxShadow:'0 2px 8px rgba(0,0,0,0.1)',
-      transition:'all 0.3s'}}>
+    <div style={{position:'fixed',top:70,right:12,zIndex:300,background:s.bg,color:s.color,
+      fontSize:12,fontWeight:700,padding:'6px 14px',borderRadius:99,
+      boxShadow:'0 2px 8px rgba(0,0,0,0.12)',transition:'all 0.3s'}}>
       {s.text}
     </div>
   )
 }
 
-// ── Main App ──
 export default function App() {
   const [patients, setPatients] = useState<Patient[]>([])
   const [packages, setPackages] = useState<Package[]>(DEFAULT_PACKAGES)
@@ -122,6 +116,7 @@ export default function App() {
   const [checked, setChecked] = useState<Checked>({})
   const [loaded, setLoaded] = useState(false)
   const [saveStatus, setSaveStatus] = useState<'idle'|'saving'|'saved'|'error'>('idle')
+  const saveTimer = useRef<ReturnType<typeof setTimeout>|null>(null)
 
   const [view, setView] = useState<'home'|'patient'|'packages'|'routine'>('home')
   const [activePid, setActivePid] = useState<string|null>(null)
@@ -132,16 +127,14 @@ export default function App() {
   const [fIcon, setFIcon] = useState('📋')
   const [fColor, setFColor] = useState(COLORS[0])
 
-  const saveTimer = useRef<ReturnType<typeof setTimeout>|null>(null)
-
-  // ── Load from Supabase on mount ──
+  // Load on mount
   useEffect(() => {
-    (async () => {
+    ;(async () => {
       const [p, pkg, r, c] = await Promise.all([
-        loadKey('patients'),
-        loadKey('packages'),
-        loadKey('routine'),
-        loadKey('checked'),
+        loadFromAPI('patients'),
+        loadFromAPI('packages'),
+        loadFromAPI('routine'),
+        loadFromAPI('checked'),
       ])
       if (p) setPatients(p)
       if (pkg) setPackages(pkg)
@@ -151,62 +144,53 @@ export default function App() {
     })()
   }, [])
 
-  // ── Auto-save whenever state changes ──
-  const triggerSave = useCallback((key: string, value: unknown) => {
+  // ── Save helpers: pass the NEW value directly, no stale closure ──
+  const showSaving = () => {
     setSaveStatus('saving')
     if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(async () => {
-      try {
-        await saveKey(key, value)
-        setSaveStatus('saved')
-        setTimeout(() => setSaveStatus('idle'), 2000)
-      } catch {
-        setSaveStatus('error')
-      }
-    }, 800)
-  }, [])
+  }
+  const showSaved = () => {
+    setSaveStatus('saved')
+    saveTimer.current = setTimeout(() => setSaveStatus('idle'), 2000)
+  }
+  const showError = () => setSaveStatus('error')
 
-  const setAndSavePatients = (v: Patient[] | ((prev: Patient[]) => Patient[])) => {
-    setPatients(prev => {
-      const next = typeof v === 'function' ? v(prev) : v
-      triggerSave('patients', next)
-      return next
-    })
+  // Each setter saves the new value immediately
+  const savePatients = async (next: Patient[]) => {
+    setPatients(next)
+    showSaving()
+    try { await saveToAPI('patients', next); showSaved() } catch { showError() }
   }
-  const setAndSavePackages = (v: Package[] | ((prev: Package[]) => Package[])) => {
-    setPackages(prev => {
-      const next = typeof v === 'function' ? v(prev) : v
-      triggerSave('packages', next)
-      return next
-    })
+  const savePackages = async (next: Package[]) => {
+    setPackages(next)
+    showSaving()
+    try { await saveToAPI('packages', next); showSaved() } catch { showError() }
   }
-  const setAndSaveRoutine = (v: Task[] | ((prev: Task[]) => Task[])) => {
-    setRoutineTpl(prev => {
-      const next = typeof v === 'function' ? v(prev) : v
-      triggerSave('routine', next)
-      return next
-    })
+  const saveRoutine = async (next: Task[]) => {
+    setRoutineTpl(next)
+    showSaving()
+    try { await saveToAPI('routine', next); showSaved() } catch { showError() }
   }
-  const setAndSaveChecked = (v: Checked | ((prev: Checked) => Checked)) => {
-    setChecked(prev => {
-      const next = typeof v === 'function' ? v(prev) : v
-      triggerSave('checked', next)
-      return next
-    })
+  const saveChecked = async (next: Checked) => {
+    setChecked(next)
+    showSaving()
+    try { await saveToAPI('checked', next); showSaved() } catch { showError() }
   }
 
   const closeModal = () => { setModal(null); setCtx({}); setFText(''); setFText2('') }
-  const activePatient = patients.find(p => p.id === activePid) ?? null
+  const activePatient = patients.find(p=>p.id===activePid) ?? null
 
-  const updatePatient = (id: string, patch: Partial<Patient>) => {
-    setAndSavePatients(prev => prev.map(p => p.id === id ? {...p,...patch} : p))
+  const updatePatient = async (id: string, patch: Partial<Patient>) => {
+    const next = patients.map(p => p.id===id ? {...p,...patch} : p)
+    await savePatients(next)
   }
 
-  const toggleCheck = (pid: string, key: string) => {
-    setAndSaveChecked(prev => ({
-      ...prev,
-      [pid]: { ...(prev[pid]||{}), [key]: !(prev[pid]||{})[key] }
-    }))
+  const toggleCheck = async (pid: string, key: string) => {
+    const next: Checked = {
+      ...checked,
+      [pid]: { ...(checked[pid]||{}), [key]: !(checked[pid]||{})[key] }
+    }
+    await saveChecked(next)
   }
 
   const calcProgress = (pt: Patient) => {
@@ -220,20 +204,19 @@ export default function App() {
       ...pkgKeys,
     ]
     const done = all.filter(k=>c[k]).length
-    return { done, total: all.length, pct: all.length ? Math.round(done/all.length*100) : 0 }
+    return { done, total:all.length, pct: all.length ? Math.round(done/all.length*100) : 0 }
   }
 
   const inp: React.CSSProperties = {
-    width:'100%',border:'1.5px solid #E2E8F0',borderRadius:11,padding:'11px 13px',
-    fontSize:14,outline:'none',boxSizing:'border-box',fontFamily:'inherit',
-    color:'#1E293B',marginBottom:12,background:'#FAFAFA',
+    width:'100%', border:'1.5px solid #E2E8F0', borderRadius:11, padding:'11px 13px',
+    fontSize:14, outline:'none', boxSizing:'border-box', fontFamily:'inherit',
+    color:'#1E293B', marginBottom:12, background:'#FAFAFA',
   }
   const btnPrimary = (color='#1A3C5E'): React.CSSProperties => ({
-    width:'100%',background:color,color:'#fff',border:'none',borderRadius:11,
-    padding:'13px',fontSize:14,fontWeight:800,cursor:'pointer',
+    width:'100%', background:color, color:'#fff', border:'none', borderRadius:11,
+    padding:'13px', fontSize:14, fontWeight:800, cursor:'pointer',
   })
 
-  // ── Modals ──
   const renderModal = () => {
     if (!modal) return null
 
@@ -245,16 +228,16 @@ export default function App() {
           <input style={inp} value={fText} onChange={e=>setFText(e.target.value)} placeholder='如：01、A床、ICU-3' autoFocus/>
           <label style={{fontSize:12,color:'#64748B',fontWeight:700,display:'block',marginBottom:5}}>病人姓名（選填）</label>
           <input style={inp} value={fText2} onChange={e=>setFText2(e.target.value)} placeholder='姓名或代稱'/>
-          <button style={btnPrimary()} onClick={()=>{
+          <button style={btnPrimary()} onClick={async ()=>{
             if (!fText.trim()) return
             if (isEdit) {
-              updatePatient(ctx.id, {bed:fText.trim(), name:fText2.trim()})
+              await updatePatient(ctx.id, {bed:fText.trim(), name:fText2.trim()})
             } else {
               const np: Patient = {
                 id:uid(), bed:fText.trim(), name:fText2.trim(),
                 packages:[], routineTasks:routineTpl.map(t=>({...t,id:uid()})), customTasks:[],
               }
-              setAndSavePatients(prev=>[...prev,np])
+              await savePatients([...patients, np])
             }
             closeModal()
           }}>{isEdit?'儲存變更':'新增病人'}</button>
@@ -269,13 +252,13 @@ export default function App() {
       return (
         <Modal title={isEdit?'編輯護理項目':'新增護理項目'} onClose={closeModal}>
           <input style={inp} value={fText} onChange={e=>setFText(e.target.value)} placeholder='輸入護理項目內容' autoFocus/>
-          <button style={btnPrimary()} onClick={()=>{
+          <button style={btnPrimary()} onClick={async ()=>{
             if (!fText.trim() || !pt) return
-            if (isEdit) {
-              updatePatient(ctx.pid, { [field]: (pt[field]||[]).map((t:Task)=>t.id===ctx.taskId?{...t,label:fText.trim()}:t) })
-            } else {
-              updatePatient(ctx.pid, { [field]: [...(pt[field]||[]), {id:uid(),label:fText.trim()}] })
-            }
+            const list: Task[] = pt[field as keyof Patient] as Task[]
+            const updated = isEdit
+              ? list.map(t=>t.id===ctx.taskId?{...t,label:fText.trim()}:t)
+              : [...list, {id:uid(),label:fText.trim()}]
+            await updatePatient(ctx.pid, {[field]: updated})
             closeModal()
           }}>{isEdit?'儲存':'新增'}</button>
         </Modal>
@@ -291,22 +274,25 @@ export default function App() {
           <label style={{fontSize:12,color:'#64748B',fontWeight:700,display:'block',marginBottom:8}}>圖示</label>
           <div style={{display:'flex',gap:7,flexWrap:'wrap',marginBottom:14}}>
             {PKG_ICONS.map(ic=>(
-              <button key={ic} onClick={()=>setFIcon(ic)} style={{width:38,height:38,fontSize:20,background:fIcon===ic?'#1A3C5E':'#F1F5F9',border:'none',borderRadius:9,cursor:'pointer',outline:fIcon===ic?'3px solid #93C5FD':'none'}}>{ic}</button>
+              <button key={ic} onClick={()=>setFIcon(ic)} style={{width:38,height:38,fontSize:20,
+                background:fIcon===ic?'#1A3C5E':'#F1F5F9',border:'none',borderRadius:9,cursor:'pointer',
+                outline:fIcon===ic?'3px solid #93C5FD':'none'}}>{ic}</button>
             ))}
           </div>
           <label style={{fontSize:12,color:'#64748B',fontWeight:700,display:'block',marginBottom:8}}>主題色</label>
           <div style={{display:'flex',gap:8,marginBottom:16}}>
             {COLORS.map(col=>(
-              <button key={col} onClick={()=>setFColor(col)} style={{width:30,height:30,background:col,border:'none',outline:fColor===col?'3px solid #334155':'2px solid transparent',outlineOffset:2,borderRadius:'50%',cursor:'pointer'}}/>
+              <button key={col} onClick={()=>setFColor(col)} style={{width:30,height:30,background:col,border:'none',
+                outline:fColor===col?'3px solid #334155':'2px solid transparent',
+                outlineOffset:2,borderRadius:'50%',cursor:'pointer'}}/>
             ))}
           </div>
-          <button style={btnPrimary(fColor)} onClick={()=>{
+          <button style={btnPrimary(fColor)} onClick={async ()=>{
             if (!fText.trim()) return
-            if (isEdit) {
-              setAndSavePackages(prev=>prev.map(p=>p.id===ctx.pkgId?{...p,name:fText.trim(),icon:fIcon,color:fColor}:p))
-            } else {
-              setAndSavePackages(prev=>[...prev,{id:uid(),name:fText.trim(),icon:fIcon,color:fColor,tasks:[]}])
-            }
+            const next = isEdit
+              ? packages.map(p=>p.id===ctx.pkgId?{...p,name:fText.trim(),icon:fIcon,color:fColor}:p)
+              : [...packages, {id:uid(),name:fText.trim(),icon:fIcon,color:fColor,tasks:[]}]
+            await savePackages(next)
             closeModal()
           }}>{isEdit?'儲存套餐':`${fIcon} 建立套餐`}</button>
         </Modal>
@@ -319,13 +305,16 @@ export default function App() {
       return (
         <Modal title={isEdit?`編輯 ${pkg?.name} 要點`:`新增 ${pkg?.name} 護理要點`} onClose={closeModal}>
           <input style={inp} value={fText} onChange={e=>setFText(e.target.value)} placeholder='輸入護理要點' autoFocus/>
-          <button style={btnPrimary(pkg?.color||'#1A3C5E')} onClick={()=>{
+          <button style={btnPrimary(pkg?.color||'#1A3C5E')} onClick={async ()=>{
             if (!fText.trim()) return
-            if (isEdit) {
-              setAndSavePackages(prev=>prev.map(p=>p.id===ctx.pkgId?{...p,tasks:p.tasks.map(t=>t.id===ctx.taskId?{...t,label:fText.trim()}:t)}:p))
-            } else {
-              setAndSavePackages(prev=>prev.map(p=>p.id===ctx.pkgId?{...p,tasks:[...(p.tasks||[]),{id:uid(),label:fText.trim()}]}:p))
-            }
+            const next = packages.map(p=>{
+              if (p.id!==ctx.pkgId) return p
+              const tasks = isEdit
+                ? p.tasks.map(t=>t.id===ctx.taskId?{...t,label:fText.trim()}:t)
+                : [...(p.tasks||[]), {id:uid(),label:fText.trim()}]
+              return {...p, tasks}
+            })
+            await savePackages(next)
             closeModal()
           }}>{isEdit?'儲存':'新增要點'}</button>
         </Modal>
@@ -337,10 +326,12 @@ export default function App() {
       return (
         <Modal title={isEdit?'編輯常規項目':'新增常規項目'} onClose={closeModal}>
           <input style={inp} value={fText} onChange={e=>setFText(e.target.value)} placeholder='輸入護理項目' autoFocus/>
-          <button style={btnPrimary()} onClick={()=>{
+          <button style={btnPrimary()} onClick={async ()=>{
             if (!fText.trim()) return
-            if (isEdit) setAndSaveRoutine(prev=>prev.map(t=>t.id===ctx.taskId?{...t,label:fText.trim()}:t))
-            else setAndSaveRoutine(prev=>[...prev,{id:uid(),label:fText.trim()}])
+            const next = isEdit
+              ? routineTpl.map(t=>t.id===ctx.taskId?{...t,label:fText.trim()}:t)
+              : [...routineTpl, {id:uid(),label:fText.trim()}]
+            await saveRoutine(next)
             closeModal()
           }}>{isEdit?'儲存':'新增'}</button>
         </Modal>
@@ -350,10 +341,10 @@ export default function App() {
     return null
   }
 
-  // ── Views ──
   if (!loaded) {
     return (
-      <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'#F0F4F8',flexDirection:'column',gap:12}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',
+        background:'#F0F4F8',flexDirection:'column',gap:12}}>
         <div style={{fontSize:40}}>🏥</div>
         <div style={{fontSize:14,color:'#64748B',fontWeight:700}}>載入資料中...</div>
         <div style={{fontSize:12,color:'#94A3B8'}}>從雲端同步</div>
@@ -361,11 +352,15 @@ export default function App() {
     )
   }
 
+  // ── Home ──
   const HomeView = () => (
     <div style={{padding:'14px 16px'}}>
       <div style={{display:'flex',alignItems:'center',marginBottom:14}}>
         <span style={{fontWeight:800,fontSize:15,color:'#0F172A',flex:1}}>今日病人床位</span>
-        <button onClick={()=>{setFText('');setFText2('');setModal('addPatient')}} style={{background:'#1A3C5E',color:'#fff',border:'none',borderRadius:10,padding:'8px 14px',fontSize:13,fontWeight:700,cursor:'pointer'}}>＋ 新增病人</button>
+        <button onClick={()=>{setFText('');setFText2('');setModal('addPatient')}}
+          style={{background:'#1A3C5E',color:'#fff',border:'none',borderRadius:10,padding:'8px 14px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+          ＋ 新增病人
+        </button>
       </div>
       {patients.length===0&&(
         <div style={{textAlign:'center',padding:'60px 20px',color:'#94A3B8'}}>
@@ -384,12 +379,18 @@ export default function App() {
                 boxShadow:'0 2px 8px rgba(0,0,0,0.06)',border:'1px solid #E2E8F0',
                 borderLeft:`5px solid ${pct===100?'#22C55E':'#1A3C5E'}`}}>
               <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:10}}>
-                <div style={{background:pct===100?'#DCFCE7':'#EFF6FF',color:pct===100?'#16A34A':'#1A3C5E',borderRadius:10,padding:'6px 14px',fontWeight:900,fontSize:18,minWidth:56,textAlign:'center'}}>{pt.bed}</div>
+                <div style={{background:pct===100?'#DCFCE7':'#EFF6FF',color:pct===100?'#16A34A':'#1A3C5E',
+                  borderRadius:10,padding:'6px 14px',fontWeight:900,fontSize:18,minWidth:56,textAlign:'center'}}>
+                  {pt.bed}
+                </div>
                 <div style={{flex:1}}>
                   <div style={{fontWeight:700,fontSize:15,color:'#0F172A'}}>{pt.name||'（未命名）'}</div>
                   <div style={{display:'flex',gap:5,flexWrap:'wrap',marginTop:5}}>
                     {assignedPkgs.map(pkg=>(
-                      <span key={pkg.id} style={{background:pkg.color+'18',color:pkg.color,fontSize:11,fontWeight:700,padding:'2px 8px',borderRadius:99,border:`1px solid ${pkg.color}33`}}>{pkg.icon} {pkg.name}</span>
+                      <span key={pkg.id} style={{background:pkg.color+'18',color:pkg.color,fontSize:11,
+                        fontWeight:700,padding:'2px 8px',borderRadius:99,border:`1px solid ${pkg.color}33`}}>
+                        {pkg.icon} {pkg.name}
+                      </span>
                     ))}
                   </div>
                 </div>
@@ -406,6 +407,7 @@ export default function App() {
     </div>
   )
 
+  // ── Patient Detail ──
   const PatientView = () => {
     const pt = patients.find(p=>p.id===activePid)
     if (!pt) return null
@@ -416,9 +418,15 @@ export default function App() {
     const TaskItem = ({taskKey,label,onEdit,onDelete}:{taskKey:string;label:string;onEdit?:()=>void;onDelete?:()=>void}) => {
       const isDone=!!c[taskKey]
       return (
-        <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',background:isDone?'#F8FAFC':'#fff',border:'1px solid #E2E8F0',borderRadius:10,marginBottom:6,opacity:isDone?0.6:1}}>
-          <button onClick={()=>toggleCheck(pt.id,taskKey)} style={{width:24,height:24,borderRadius:'50%',flexShrink:0,cursor:'pointer',border:'none',background:isDone?'#22C55E':'#E2E8F0',color:'#fff',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',transition:'background 0.2s'}}>{isDone?'✓':''}</button>
-          <span style={{flex:1,fontSize:13,color:isDone?'#94A3B8':'#334155',textDecoration:isDone?'line-through':'none',lineHeight:1.4}}>{label}</span>
+        <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 12px',
+          background:isDone?'#F8FAFC':'#fff',border:'1px solid #E2E8F0',
+          borderRadius:10,marginBottom:6,opacity:isDone?0.6:1}}>
+          <button onClick={()=>toggleCheck(pt.id,taskKey)} style={{width:24,height:24,borderRadius:'50%',
+            flexShrink:0,cursor:'pointer',border:'none',background:isDone?'#22C55E':'#E2E8F0',
+            color:'#fff',fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',
+            transition:'background 0.2s'}}>{isDone?'✓':''}</button>
+          <span style={{flex:1,fontSize:13,color:isDone?'#94A3B8':'#334155',
+            textDecoration:isDone?'line-through':'none',lineHeight:1.4}}>{label}</span>
           {onEdit&&<button onClick={onEdit} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:15,padding:'0 2px'}}>✏️</button>}
           {onDelete&&<button onClick={onDelete} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:14,padding:'0 2px'}}>🗑</button>}
         </div>
@@ -429,7 +437,8 @@ export default function App() {
       <div style={{display:'flex',alignItems:'center',marginBottom:9}}>
         <div style={{width:4,height:16,background:color,borderRadius:2,marginRight:8,flexShrink:0}}/>
         <span style={{fontWeight:800,fontSize:13,color:'#1E293B',flex:1}}>{label}</span>
-        {onAdd&&<button onClick={onAdd} style={{background:color+'1A',color:color,border:'none',borderRadius:8,padding:'4px 11px',fontSize:12,fontWeight:700,cursor:'pointer'}}>＋ 新增</button>}
+        {onAdd&&<button onClick={onAdd} style={{background:color+'1A',color:color,border:'none',
+          borderRadius:8,padding:'4px 11px',fontSize:12,fontWeight:700,cursor:'pointer'}}>＋ 新增</button>}
       </div>
     )
 
@@ -442,7 +451,9 @@ export default function App() {
               <div style={{fontWeight:700,fontSize:17}}>{pt.name||'（未命名）'}</div>
               <div style={{fontSize:12,opacity:0.75,marginTop:2}}>{total} 項護理任務</div>
             </div>
-            <button onClick={()=>{setFText(pt.bed);setFText2(pt.name||'');setCtx({id:pt.id});setModal('editPatient')}} style={{background:'rgba(255,255,255,0.15)',border:'1px solid rgba(255,255,255,0.3)',borderRadius:9,color:'#fff',fontSize:12,padding:'6px 11px',cursor:'pointer',fontWeight:600}}>✏️ 編輯</button>
+            <button onClick={()=>{setFText(pt.bed);setFText2(pt.name||'');setCtx({id:pt.id});setModal('editPatient')}}
+              style={{background:'rgba(255,255,255,0.15)',border:'1px solid rgba(255,255,255,0.3)',
+                borderRadius:9,color:'#fff',fontSize:12,padding:'6px 11px',cursor:'pointer',fontWeight:600}}>✏️ 編輯</button>
           </div>
           <div style={{fontSize:12,opacity:0.9,marginBottom:6}}>完成進度 {done}/{total}（{pct}%）</div>
           <div style={{background:'rgba(255,255,255,0.2)',borderRadius:99,height:9,overflow:'hidden'}}>
@@ -450,6 +461,7 @@ export default function App() {
           </div>
         </div>
 
+        {/* Package assignment */}
         <div style={{background:'#fff',borderRadius:14,padding:'14px',marginBottom:12,border:'1px solid #E2E8F0'}}>
           <SectionHeader label='🗂 疾病套餐分配' color='#6D28D9'/>
           {packages.length===0&&<div style={{fontSize:12,color:'#94A3B8'}}>尚無套餐，請至「套餐管理」建立</div>}
@@ -457,28 +469,36 @@ export default function App() {
             {packages.map(pkg=>{
               const on=(pt.packages||[]).includes(pkg.id)
               return (
-                <button key={pkg.id} onClick={()=>{
+                <button key={pkg.id} onClick={async ()=>{
                   const cur=pt.packages||[]
-                  updatePatient(pt.id,{packages:on?cur.filter(x=>x!==pkg.id):[...cur,pkg.id]})
-                }} style={{background:on?pkg.color:'#F8FAFC',color:on?'#fff':pkg.color,border:`2px solid ${pkg.color}`,borderRadius:99,padding:'7px 14px',fontSize:13,fontWeight:700,cursor:'pointer',transition:'all 0.2s'}}>{pkg.icon} {pkg.name}</button>
+                  await updatePatient(pt.id,{packages:on?cur.filter(x=>x!==pkg.id):[...cur,pkg.id]})
+                }} style={{background:on?pkg.color:'#F8FAFC',color:on?'#fff':pkg.color,
+                  border:`2px solid ${pkg.color}`,borderRadius:99,padding:'7px 14px',
+                  fontSize:13,fontWeight:700,cursor:'pointer',transition:'all 0.2s'}}>
+                  {pkg.icon} {pkg.name}
+                </button>
               )
             })}
           </div>
         </div>
 
+        {/* Routine */}
         <div style={{background:'#fff',borderRadius:14,padding:'14px',marginBottom:12,border:'1px solid #E2E8F0'}}>
-          <SectionHeader label='常規護理項目' color='#1A3C5E' onAdd={()=>{setFText('');setCtx({pid:pt.id,section:'routine'});setModal('addPatientTask')}}/>
+          <SectionHeader label='常規護理項目' color='#1A3C5E'
+            onAdd={()=>{setFText('');setCtx({pid:pt.id,section:'routine'});setModal('addPatientTask')}}/>
           {(pt.routineTasks||[]).length===0&&<div style={{fontSize:12,color:'#94A3B8',paddingLeft:12}}>尚無項目</div>}
           {(pt.routineTasks||[]).map(task=>(
             <TaskItem key={task.id} taskKey={`r_${task.id}`} label={task.label}
               onEdit={()=>{setFText(task.label);setCtx({pid:pt.id,section:'routine',taskId:task.id});setModal('editPatientTask')}}
-              onDelete={()=>updatePatient(pt.id,{routineTasks:(pt.routineTasks||[]).filter(t=>t.id!==task.id)})}
+              onDelete={async ()=>await updatePatient(pt.id,{routineTasks:(pt.routineTasks||[]).filter(t=>t.id!==task.id)})}
             />
           ))}
         </div>
 
+        {/* Package tasks */}
         {assignedPkgs.map(pkg=>(
-          <div key={pkg.id} style={{background:'#fff',borderRadius:14,padding:'14px',marginBottom:12,border:`1px solid ${pkg.color}33`,borderTop:`3px solid ${pkg.color}`}}>
+          <div key={pkg.id} style={{background:'#fff',borderRadius:14,padding:'14px',marginBottom:12,
+            border:`1px solid ${pkg.color}33`,borderTop:`3px solid ${pkg.color}`}}>
             <SectionHeader label={`${pkg.icon} ${pkg.name} 護理要點`} color={pkg.color}/>
             {(pkg.tasks||[]).length===0&&<div style={{fontSize:12,color:'#94A3B8',paddingLeft:12}}>此套餐尚無要點，請至套餐管理編輯</div>}
             {(pkg.tasks||[]).map(task=>(
@@ -487,30 +507,35 @@ export default function App() {
           </div>
         ))}
 
+        {/* Custom */}
         <div style={{background:'#fff',borderRadius:14,padding:'14px',marginBottom:12,border:'1px solid #E2E8F0'}}>
-          <SectionHeader label='個人化護理項目' color='#7C3AED' onAdd={()=>{setFText('');setCtx({pid:pt.id,section:'custom'});setModal('addPatientTask')}}/>
+          <SectionHeader label='個人化護理項目' color='#7C3AED'
+            onAdd={()=>{setFText('');setCtx({pid:pt.id,section:'custom'});setModal('addPatientTask')}}/>
           {(pt.customTasks||[]).length===0&&<div style={{fontSize:12,color:'#94A3B8',paddingLeft:12}}>可新增此病人專屬的護理任務</div>}
           {(pt.customTasks||[]).map(task=>(
             <TaskItem key={task.id} taskKey={`cu_${task.id}`} label={task.label}
               onEdit={()=>{setFText(task.label);setCtx({pid:pt.id,section:'custom',taskId:task.id});setModal('editPatientTask')}}
-              onDelete={()=>updatePatient(pt.id,{customTasks:(pt.customTasks||[]).filter(t=>t.id!==task.id)})}
+              onDelete={async ()=>await updatePatient(pt.id,{customTasks:(pt.customTasks||[]).filter(t=>t.id!==task.id)})}
             />
           ))}
         </div>
 
         {pct===100&&(
-          <div style={{background:'linear-gradient(135deg,#DCFCE7,#BBF7D0)',border:'1px solid #86EFAC',borderRadius:14,padding:'16px',textAlign:'center',color:'#14532D',marginBottom:14}}>
+          <div style={{background:'linear-gradient(135deg,#DCFCE7,#BBF7D0)',border:'1px solid #86EFAC',
+            borderRadius:14,padding:'16px',textAlign:'center',color:'#14532D',marginBottom:14}}>
             <div style={{fontSize:30}}>🌟</div>
             <div style={{fontWeight:800,fontSize:15,marginTop:6}}>此病人所有護理任務完成！</div>
           </div>
         )}
 
         <div style={{textAlign:'center',paddingTop:4,paddingBottom:8}}>
-          <button onClick={()=>{
+          <button onClick={async ()=>{
             if(!window.confirm('確定要刪除此病人及所有記錄？')) return
-            setAndSavePatients(prev=>prev.filter(p=>p.id!==pt.id))
-            setAndSaveChecked(prev=>{const c={...prev};delete c[pt.id];return c})
-            setView('home');setActivePid(null)
+            const nextP = patients.filter(p=>p.id!==pt.id)
+            const nextC = {...checked}; delete nextC[pt.id]
+            await savePatients(nextP)
+            await saveChecked(nextC)
+            setView('home'); setActivePid(null)
           }} style={{background:'none',border:'1px solid #FCA5A5',color:'#EF4444',borderRadius:10,padding:'9px 22px',fontSize:13,cursor:'pointer'}}>
             🗑 刪除此病人
           </button>
@@ -519,39 +544,62 @@ export default function App() {
     )
   }
 
+  // ── Packages ──
   const PackagesView = () => (
     <div style={{padding:'14px 16px'}}>
       <div style={{display:'flex',alignItems:'center',marginBottom:14}}>
         <span style={{fontWeight:800,fontSize:15,color:'#0F172A',flex:1}}>疾病套餐管理</span>
-        <button onClick={()=>{setFText('');setFIcon('📋');setFColor(COLORS[0]);setModal('addPkg')}} style={{background:'#1A3C5E',color:'#fff',border:'none',borderRadius:10,padding:'8px 14px',fontSize:13,fontWeight:700,cursor:'pointer'}}>＋ 新增套餐</button>
+        <button onClick={()=>{setFText('');setFIcon('📋');setFColor(COLORS[0]);setModal('addPkg')}}
+          style={{background:'#1A3C5E',color:'#fff',border:'none',borderRadius:10,padding:'8px 14px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+          ＋ 新增套餐
+        </button>
       </div>
+      {packages.length===0&&(
+        <div style={{textAlign:'center',padding:'50px 20px',color:'#94A3B8'}}>
+          <div style={{fontSize:46}}>🗂️</div>
+          <div style={{fontSize:14,marginTop:8}}>尚無套餐</div>
+        </div>
+      )}
       {packages.map(pkg=>(
-        <div key={pkg.id} style={{background:'#fff',borderRadius:16,padding:'16px',marginBottom:14,border:`1px solid ${pkg.color}33`,borderTop:`4px solid ${pkg.color}`,boxShadow:'0 2px 8px rgba(0,0,0,0.05)'}}>
+        <div key={pkg.id} style={{background:'#fff',borderRadius:16,padding:'16px',marginBottom:14,
+          border:`1px solid ${pkg.color}33`,borderTop:`4px solid ${pkg.color}`,boxShadow:'0 2px 8px rgba(0,0,0,0.05)'}}>
           <div style={{display:'flex',alignItems:'center',marginBottom:12}}>
             <span style={{fontSize:22,marginRight:8}}>{pkg.icon}</span>
             <span style={{fontWeight:800,fontSize:16,color:'#0F172A',flex:1}}>{pkg.name}</span>
-            <button onClick={()=>{setFText(pkg.name);setFIcon(pkg.icon);setFColor(pkg.color);setCtx({pkgId:pkg.id});setModal('editPkg')}} style={{background:'none',border:'none',cursor:'pointer',color:'#94A3B8',fontSize:15,padding:'0 5px'}}>✏️</button>
-            <button onClick={()=>{
+            <button onClick={()=>{setFText(pkg.name);setFIcon(pkg.icon);setFColor(pkg.color);setCtx({pkgId:pkg.id});setModal('editPkg')}}
+              style={{background:'none',border:'none',cursor:'pointer',color:'#94A3B8',fontSize:15,padding:'0 5px'}}>✏️</button>
+            <button onClick={async ()=>{
               if(!window.confirm(`確定刪除「${pkg.name}」套餐？`)) return
-              setAndSavePackages(prev=>prev.filter(p=>p.id!==pkg.id))
-              setAndSavePatients(prev=>prev.map(pt=>({...pt,packages:(pt.packages||[]).filter(x=>x!==pkg.id)})))
+              await savePackages(packages.filter(p=>p.id!==pkg.id))
+              await savePatients(patients.map(pt=>({...pt,packages:(pt.packages||[]).filter(x=>x!==pkg.id)})))
             }} style={{background:'none',border:'none',cursor:'pointer',color:'#94A3B8',fontSize:14,padding:'0 5px'}}>🗑</button>
           </div>
           {(pkg.tasks||[]).map(task=>(
-            <div key={task.id} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 11px',background:'#F8FAFC',borderRadius:9,marginBottom:5}}>
+            <div key={task.id} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 11px',
+              background:'#F8FAFC',borderRadius:9,marginBottom:5}}>
               <span style={{width:8,height:8,borderRadius:'50%',background:pkg.color,flexShrink:0}}/>
               <span style={{flex:1,fontSize:13,color:'#334155',lineHeight:1.4}}>{task.label}</span>
-              <button onClick={()=>{setFText(task.label);setCtx({pkgId:pkg.id,taskId:task.id});setModal('editPkgTask')}} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:14}}>✏️</button>
-              <button onClick={()=>setAndSavePackages(prev=>prev.map(p=>p.id===pkg.id?{...p,tasks:p.tasks.filter(t=>t.id!==task.id)}:p))} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:13}}>🗑</button>
+              <button onClick={()=>{setFText(task.label);setCtx({pkgId:pkg.id,taskId:task.id});setModal('editPkgTask')}}
+                style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:14}}>✏️</button>
+              <button onClick={async ()=>{
+                const next = packages.map(p=>p.id===pkg.id?{...p,tasks:p.tasks.filter(t=>t.id!==task.id)}:p)
+                await savePackages(next)
+              }} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:13}}>🗑</button>
             </div>
           ))}
           {(pkg.tasks||[]).length===0&&<div style={{fontSize:12,color:'#94A3B8',padding:'4px 11px'}}>尚無護理要點</div>}
-          <button onClick={()=>{setFText('');setCtx({pkgId:pkg.id});setModal('addPkgTask')}} style={{marginTop:8,background:pkg.color+'15',color:pkg.color,border:`1.5px dashed ${pkg.color}66`,borderRadius:9,width:'100%',padding:'8px',fontSize:12,fontWeight:700,cursor:'pointer'}}>＋ 新增護理要點</button>
+          <button onClick={()=>{setFText('');setCtx({pkgId:pkg.id});setModal('addPkgTask')}}
+            style={{marginTop:8,background:pkg.color+'15',color:pkg.color,
+              border:`1.5px dashed ${pkg.color}66`,borderRadius:9,width:'100%',
+              padding:'8px',fontSize:12,fontWeight:700,cursor:'pointer'}}>
+            ＋ 新增護理要點
+          </button>
         </div>
       ))}
     </div>
   )
 
+  // ── Routine Template ──
   const RoutineView = () => (
     <div style={{padding:'14px 16px'}}>
       <div style={{background:'#EFF6FF',border:'1px solid #BFDBFE',borderRadius:12,padding:'12px 14px',marginBottom:14,fontSize:12,color:'#1D4ED8',lineHeight:1.6}}>
@@ -559,15 +607,22 @@ export default function App() {
       </div>
       <div style={{display:'flex',alignItems:'center',marginBottom:14}}>
         <span style={{fontWeight:800,fontSize:15,color:'#0F172A',flex:1}}>常規護理範本</span>
-        <button onClick={()=>{setFText('');setModal('addRoutine')}} style={{background:'#1A3C5E',color:'#fff',border:'none',borderRadius:10,padding:'8px 14px',fontSize:13,fontWeight:700,cursor:'pointer'}}>＋ 新增</button>
+        <button onClick={()=>{setFText('');setModal('addRoutine')}}
+          style={{background:'#1A3C5E',color:'#fff',border:'none',borderRadius:10,padding:'8px 14px',fontSize:13,fontWeight:700,cursor:'pointer'}}>
+          ＋ 新增
+        </button>
       </div>
       <div style={{background:'#fff',borderRadius:14,padding:'12px',border:'1px solid #E2E8F0'}}>
         {routineTpl.map((task,i)=>(
-          <div key={task.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',background:i%2===0?'#F8FAFC':'#fff',borderRadius:9,marginBottom:4}}>
-            <span style={{width:24,height:24,background:'#EFF6FF',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:800,color:'#1A3C5E',flexShrink:0}}>{i+1}</span>
+          <div key={task.id} style={{display:'flex',alignItems:'center',gap:10,padding:'9px 10px',
+            background:i%2===0?'#F8FAFC':'#fff',borderRadius:9,marginBottom:4}}>
+            <span style={{width:24,height:24,background:'#EFF6FF',borderRadius:'50%',display:'flex',
+              alignItems:'center',justifyContent:'center',fontSize:11,fontWeight:800,color:'#1A3C5E',flexShrink:0}}>{i+1}</span>
             <span style={{flex:1,fontSize:13,color:'#334155'}}>{task.label}</span>
-            <button onClick={()=>{setFText(task.label);setCtx({taskId:task.id});setModal('editRoutine')}} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:14}}>✏️</button>
-            <button onClick={()=>setAndSaveRoutine(prev=>prev.filter(t=>t.id!==task.id))} style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:13}}>🗑</button>
+            <button onClick={()=>{setFText(task.label);setCtx({taskId:task.id});setModal('editRoutine')}}
+              style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:14}}>✏️</button>
+            <button onClick={async ()=>await saveRoutine(routineTpl.filter(t=>t.id!==task.id))}
+              style={{background:'none',border:'none',color:'#CBD5E1',cursor:'pointer',fontSize:13}}>🗑</button>
           </div>
         ))}
         {routineTpl.length===0&&<div style={{fontSize:12,color:'#94A3B8',textAlign:'center',padding:'20px'}}>尚無常規項目</div>}
@@ -575,15 +630,24 @@ export default function App() {
     </div>
   )
 
-  const navItems = [{key:'home',icon:'🛏️',label:'病人'},{key:'packages',icon:'🗂️',label:'套餐'},{key:'routine',icon:'📋',label:'常規範本'}]
+  const navItems = [
+    {key:'home',   icon:'🛏️', label:'病人'},
+    {key:'packages',icon:'🗂️', label:'套餐'},
+    {key:'routine', icon:'📋', label:'常規範本'},
+  ]
 
   return (
     <div style={{fontFamily:"'Noto Sans TC','Microsoft JhengHei',sans-serif",background:'#F0F4F8',minHeight:'100vh',maxWidth:430,margin:'0 auto',paddingBottom:72}}>
-      <SaveIndicator status={saveStatus}/>
-      <div style={{background:'linear-gradient(135deg,#1A3C5E 0%,#2D6A9F 100%)',padding:'18px 18px 16px',color:'#fff',position:'sticky',top:0,zIndex:90,boxShadow:'0 4px 20px rgba(26,60,94,0.25)'}}>
+      <SaveBadge status={saveStatus}/>
+
+      {/* Header */}
+      <div style={{background:'linear-gradient(135deg,#1A3C5E 0%,#2D6A9F 100%)',padding:'18px 18px 16px',
+        color:'#fff',position:'sticky',top:0,zIndex:90,boxShadow:'0 4px 20px rgba(26,60,94,0.25)'}}>
         <div style={{display:'flex',alignItems:'center',gap:10}}>
           {view==='patient'&&(
-            <button onClick={()=>{setView('home');setActivePid(null)}} style={{background:'rgba(255,255,255,0.15)',border:'none',borderRadius:8,color:'#fff',fontSize:20,width:34,height:34,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>‹</button>
+            <button onClick={()=>{setView('home');setActivePid(null)}}
+              style={{background:'rgba(255,255,255,0.15)',border:'none',borderRadius:8,color:'#fff',
+                fontSize:20,width:34,height:34,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>‹</button>
           )}
           <span style={{fontSize:20}}>🏥</span>
           <div>
@@ -603,10 +667,16 @@ export default function App() {
       {view==='packages'&&<PackagesView/>}
       {view==='routine'&&<RoutineView/>}
 
+      {/* Bottom Nav */}
       {view!=='patient'&&(
-        <div style={{position:'fixed',bottom:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:430,background:'#fff',borderTop:'1px solid #E2E8F0',display:'flex',boxShadow:'0 -4px 20px rgba(0,0,0,0.08)',zIndex:90}}>
+        <div style={{position:'fixed',bottom:0,left:'50%',transform:'translateX(-50%)',width:'100%',maxWidth:430,
+          background:'#fff',borderTop:'1px solid #E2E8F0',display:'flex',
+          boxShadow:'0 -4px 20px rgba(0,0,0,0.08)',zIndex:90}}>
           {navItems.map(n=>(
-            <button key={n.key} onClick={()=>setView(n.key as typeof view)} style={{flex:1,padding:'10px 0 8px',background:'none',border:'none',cursor:'pointer',color:view===n.key?'#1A3C5E':'#94A3B8',borderTop:view===n.key?'3px solid #1A3C5E':'3px solid transparent',transition:'all 0.2s'}}>
+            <button key={n.key} onClick={()=>setView(n.key as typeof view)}
+              style={{flex:1,padding:'10px 0 8px',background:'none',border:'none',cursor:'pointer',
+                color:view===n.key?'#1A3C5E':'#94A3B8',
+                borderTop:view===n.key?'3px solid #1A3C5E':'3px solid transparent',transition:'all 0.2s'}}>
               <div style={{fontSize:21}}>{n.icon}</div>
               <div style={{fontSize:10,fontWeight:view===n.key?800:400,marginTop:2}}>{n.label}</div>
             </button>
