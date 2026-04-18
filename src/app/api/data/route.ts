@@ -1,33 +1,68 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextRequest, NextResponse } from 'next/server'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  const url = process.env.SUPABASE_URL
+  const key = process.env.SUPABASE_ANON_KEY
+
+  if (!url || !key) {
+    throw new Error('Missing Supabase env')
+  }
+
+  return createClient(url, key)
+}
 
 export async function GET(request: NextRequest) {
-  const key = request.nextUrl.searchParams.get('key')
-  if (!key) return NextResponse.json({ error: 'missing key' }, { status: 400 })
+  try {
+    const key = request.nextUrl.searchParams.get('key')
+    if (!key) {
+      return NextResponse.json({ error: 'missing key' }, { status: 400 })
+    }
 
-  const { data, error } = await supabase
-    .from('nursing_data')
-    .select('value')
-    .eq('key', key)
-    .single()
+    const supabase = getSupabase()
 
-  if (error || !data) return NextResponse.json({ value: null })
-  return NextResponse.json({ value: data.value })
+    const { data, error } = await supabase
+      .from('nursing_data')
+      .select('value')
+      .eq('key', key)
+      .single()
+
+    if (error || !data) {
+      return NextResponse.json({ value: null })
+    }
+
+    return NextResponse.json({ value: data.value })
+  } catch (e) {
+    return NextResponse.json({ error: 'server error' }, { status: 500 })
+  }
 }
 
 export async function POST(request: NextRequest) {
-  const { key, value } = await request.json()
-  if (!key) return NextResponse.json({ error: 'missing key' }, { status: 400 })
+  try {
+    const { key, value } = await request.json()
 
-  const { error } = await supabase
-    .from('nursing_data')
-    .upsert({ key, value, updated_at: new Date().toISOString() })
+    if (!key) {
+      return NextResponse.json({ error: 'missing key' }, { status: 400 })
+    }
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ ok: true })
+    const supabase = getSupabase()
+
+    const { error } = await supabase
+      .from('nursing_data')
+      .upsert({
+        key,
+        value,
+        updated_at: new Date().toISOString()
+      })
+
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 })
+    }
+
+    return NextResponse.json({ ok: true })
+  } catch (e) {
+    return NextResponse.json({ error: 'server error' }, { status: 500 })
+  }
 }
